@@ -128,10 +128,21 @@ export default function App() {
     async function checkUrl() {
       try {
         const res = await fetch(`/api/check-url?url=${encodeURIComponent(url)}`);
+        const contentType = res.headers.get('content-type') || '';
+        
+        // If the backend endpoint is not found or returned HTML (e.g. on Vercel static fallback)
+        if (!res.ok && !contentType.includes('application/json')) {
+          console.warn('Endpoint /api/check-url tidak tersedia (hosting statis/Vercel tanpa backend). Mengizinkan iframe memuat langsung.');
+          setUrlStatus({ ok: true });
+          return;
+        }
+
         const data = await res.json();
         setUrlStatus(data);
       } catch (err) {
-        setUrlStatus({ ok: false, errorType: 'connection_error' });
+        // Jika fetch gagal (misal koneksi atau hosting statis murni), jangan blokir iframe dengan Connection Error
+        console.warn('Gagal memverifikasi URL via API, memuat iframe langsung:', err);
+        setUrlStatus({ ok: true });
       }
     }
     checkUrl();
@@ -740,13 +751,21 @@ window.addEventListener('message', (e) => {
           {icon}
           <h3 className="text-lg font-bold text-neutral-800 dark:text-neutral-200 mb-2">{title}</h3>
           <p className="text-sm text-neutral-500 dark:text-neutral-400 max-w-sm">{desc}</p>
-          <button 
-            onClick={openInNewTab}
-            className="mt-6 flex items-center gap-2 px-4 py-2 bg-black dark:bg-white text-white dark:text-black text-sm font-medium rounded-lg hover:bg-neutral-800 dark:hover:bg-neutral-200 transition-colors"
-          >
-            <span>Open in New Tab</span>
-            <ExternalLink size={16} />
-          </button>
+          <div className="mt-5 flex flex-wrap items-center justify-center gap-2.5">
+            <button 
+              onClick={() => setUrlStatus({ ok: true })}
+              className="flex items-center gap-1.5 px-3.5 py-2 bg-neutral-200 dark:bg-neutral-800 text-neutral-800 dark:text-neutral-200 text-xs sm:text-sm font-medium rounded-lg hover:bg-neutral-300 dark:hover:bg-neutral-700 transition-colors cursor-pointer"
+            >
+              <span>Tetap Coba Muat Iframe</span>
+            </button>
+            <button 
+              onClick={openInNewTab}
+              className="flex items-center gap-1.5 px-3.5 py-2 bg-black dark:bg-white text-white dark:text-black text-xs sm:text-sm font-medium rounded-lg hover:bg-neutral-800 dark:hover:bg-neutral-200 transition-colors cursor-pointer"
+            >
+              <span>Buka di Tab Baru</span>
+              <ExternalLink size={15} />
+            </button>
+          </div>
         </div>
       );
     };
