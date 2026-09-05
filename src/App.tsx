@@ -37,7 +37,11 @@ import {
   Code,
   Download,
   Image as ImageIcon,
-  Layers
+  Layers,
+  Timer,
+  Keyboard,
+  Sparkles,
+  Info
 } from 'lucide-react';
 import { DeviceDefinition, DeviceType } from './types';
 
@@ -134,9 +138,19 @@ async function createMockupImage(imgBlob: Blob, deviceType: DeviceType, isRotate
         ctx.fill();
       }
 
-      canvas.toBlob((blob) => {
-        resolve(blob || imgBlob);
-      }, 'image/png');
+      const createBlob = () => {
+        canvas.toBlob((blob) => {
+          resolve(blob || imgBlob);
+        }, 'image/png');
+      };
+
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => {
+          createBlob();
+        });
+      } else {
+        createBlob();
+      }
     };
     img.onerror = () => {
       URL.revokeObjectURL(objectUrl);
@@ -305,6 +319,32 @@ export default function App() {
   } | null>(null);
   const [screenshotError, setScreenshotError] = useState<string | null>(null);
   const [copiedScreenshot, setCopiedScreenshot] = useState(false);
+  const [screenshotDelay, setScreenshotDelay] = useState<number>(0);
+  const [countdownRemaining, setCountdownRemaining] = useState<number | null>(null);
+  const [showHelpModal, setShowHelpModal] = useState(false);
+  const [copiedUrlFeedback, setCopiedUrlFeedback] = useState(false);
+
+  // Global keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || (e.target as HTMLElement)?.isContentEditable) {
+        return;
+      }
+
+      if (e.key === '?' || (e.key === '/' && e.shiftKey)) {
+        e.preventDefault();
+        setShowHelpModal(prev => !prev);
+      } else if (e.key === 'Escape') {
+        setShowHelpModal(false);
+        setShowSyncInfoModal(false);
+        setShowScreenshotModal(false);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   const iframeRef1 = useRef<HTMLIFrameElement>(null);
   const iframeRef2 = useRef<HTMLIFrameElement>(null);
@@ -598,30 +638,43 @@ window.addEventListener('message', (e) => {
     return { targetW, targetH, devName, activeDev, isRot };
   };
 
+  // Deteksi apakah Screen Capture API didukung di lingkungan peramban saat ini (desktop vs mobile/iframe)
+  const isScreenCaptureSupported = typeof navigator !== 'undefined' &&
+    !!navigator.mediaDevices &&
+    typeof navigator.mediaDevices.getDisplayMedia === 'function';
+
   const handleOpenScreenshotModal = (pane: 1 | 2) => {
     setScreenshotPane(pane);
     setShowScreenshotModal(true);
     setScreenshotError(null);
     setScreenshotResult(null);
 
-    // Otomatis pakai mode 'device' dan sync bezel
-    const useBezel = showBezel;
-    setIncludeBezelMockup(useBezel);
+    // Default tangkapan layar murni website (tanpa bezel), agar pengguna mendapatkan tampilan website yang jelas
+    const withBezel = false;
+    setIncludeBezelMockup(false);
 
-    // Langsung mulai proses pengambilan tangkapan layar
-    executeScreenshot(pane, screenshotMode, useBezel);
+    // Pastikan mode tab hanya digunakan jika peramban benar-benar mendukungnya, default ke 'device'
+    const targetMode = screenshotMode === 'tab' && isScreenCaptureSupported ? 'tab' : 'device';
+    if (screenshotMode !== targetMode) {
+      setScreenshotMode(targetMode);
+    }
+
+    // Langsung mulai proses pengambilan tangkapan layar dengan pengaturan delay aktif
+    executeScreenshot(pane, targetMode, false, screenshotDelay);
   };
 
   const executeScreenshot = async (
     pane: 1 | 2,
     mode: 'device' | 'tab' = screenshotMode,
-    withBezel: boolean = includeBezelMockup
+    withBezel: boolean = includeBezelMockup,
+    delaySec: number = screenshotDelay
   ) => {
     if (pane === 1) setIsCapturing(true);
     else setIsCapturing2(true);
 
     setScreenshotError(null);
     setCopiedScreenshot(false);
+    setCountdownRemaining(delaySec > 0 ? delaySec : null);
 
     const { targetW, targetH, devName, activeDev, isRot } = getDeviceDimensions(pane);
 
@@ -629,14 +682,37 @@ window.addEventListener('message', (e) => {
       let finalBlob: Blob | null = null;
 
       if (mode === 'tab') {
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-          throw new Error('Peramban ini tidak mendukung Screen Capture API.');
+        if (!isScreenCaptureSupported) {
+          // Jika peramban atau iframe tidak mendukung Screen Capture API, beralih otomatis ke mode 'device'
+          setScreenshotMode('device');
+          return executeScreenshot(pane, 'device', withBezel, delaySec);
         }
 
-        const stream = await navigator.mediaDevices.getDisplayMedia({
-          video: { displaySurface: 'browser' } as any,
-          audio: false,
-        });
+        let stream: MediaStream | null = null;
+        try {
+          stream = await navigator.mediaDevices.getDisplayMedia({
+            video: { displaySurface: 'browser' } as any,
+            audio: false,
+          });
+        } catch (mediaErr: any) {
+          if (mediaErr.name === 'NotAllowedError' || mediaErr.message?.includes('Permission denied')) {
+            setScreenshotError('Pengambilan tangkapan layar dibatalkan.');
+            return;
+          } else {
+            console.warn('Screen capture dibatasi lingkungan peramban/iframe, beralih ke Resolusi Perangkat:', mediaErr);
+            setScreenshotMode('device');
+            return executeScreenshot(pane, 'device', withBezel, delaySec);
+          }
+        }
+
+        // Jeda waktu user-adjustable sebelum frame ditangkap (agar animasi selesai)
+        if (delaySec > 0) {
+          for (let rem = delaySec; rem > 0; rem--) {
+            setCountdownRemaining(rem);
+            await new Promise((r) => setTimeout(r, 1000));
+          }
+          setCountdownRemaining(null);
+        }
 
         const track = stream.getVideoTracks()[0];
         const video = document.createElement('video');
@@ -666,22 +742,72 @@ window.addEventListener('message', (e) => {
 
         const isLocal = cleanUrl.includes('localhost') || cleanUrl.includes('127.0.0.1');
         if (isLocal) {
-          throw new Error('Website lokal (localhost) tidak dapat diakses server luar. Silakan beralih ke tab opsi "Tangkap Layar Tab Browser" di atas.');
+          if (isScreenCaptureSupported) {
+            setScreenshotMode('tab');
+            return executeScreenshot(pane, 'tab', false, delaySec);
+          } else {
+            throw new Error('Website lokal (localhost) tidak dapat diakses server luar. Silakan uji URL publik atau buka aplikasi di tab baru browser desktop.');
+          }
         }
 
-        // Coba endpoint backend /api/screenshot terlebih dahulu
+        // Live visual timer jika user mengatur delay
+        let countdownInterval: any = null;
+        if (delaySec > 0) {
+          let rem = delaySec;
+          countdownInterval = setInterval(() => {
+            rem -= 1;
+            if (rem <= 0) {
+              clearInterval(countdownInterval);
+              setCountdownRemaining(null);
+            } else {
+              setCountdownRemaining(rem);
+            }
+          }, 1000);
+        }
+
+        // Coba endpoint backend /api/screenshot terlebih dahulu (Headless Chrome dengan parameter delay)
         try {
-          const apiRes = await fetch(`/api/screenshot?url=${encodeURIComponent(cleanUrl)}&width=${targetW}&height=${targetH}`);
+          const apiRes = await fetch(
+            `/api/screenshot?url=${encodeURIComponent(cleanUrl)}&width=${targetW}&height=${targetH}&delay=${delaySec}`
+          );
           if (apiRes.ok && apiRes.headers.get('content-type')?.includes('image')) {
-            finalBlob = await apiRes.blob();
+            const blob = await apiRes.blob();
+            if (blob.size > 500) {
+              finalBlob = blob;
+            }
           }
         } catch (apiErr) {
           console.warn('Backend screenshot endpoint tidak merespons, mencoba direct fallback:', apiErr);
+        } finally {
+          if (countdownInterval) {
+            clearInterval(countdownInterval);
+            setCountdownRemaining(null);
+          }
         }
 
-        // Fallback langsung ke service jika backend tidak tersedia
+        // Fallback langsung ke Headless Chrome Microlink di sisi klien jika backend tidak tersedia
         if (!finalBlob) {
-          const directThumUrl = `https://image.thum.io/get/width/${targetW}/crop/${targetH}/${cleanUrl}`;
+          try {
+            let directMicroUrl = `https://api.microlink.io?url=${encodeURIComponent(cleanUrl)}&screenshot=true&meta=false&embed=screenshot.url&viewport.width=${targetW}&viewport.height=${targetH}&viewport.isMobile=${targetW < 768}`;
+            if (delaySec > 0) {
+              directMicroUrl += `&waitForTimeout=${delaySec * 1000}`;
+            }
+            const microRes = await fetch(directMicroUrl);
+            if (microRes.ok && microRes.headers.get('content-type')?.includes('image')) {
+              const blob = await microRes.blob();
+              if (blob.size > 500) {
+                finalBlob = blob;
+              }
+            }
+          } catch (microErr) {
+            console.warn('Direct Microlink fallback gagal:', microErr);
+          }
+        }
+
+        // Fallback sekunder: Thum.io dengan waktu tunggu (wait delay detik) agar JS website ter-render
+        if (!finalBlob) {
+          const waitTime = Math.max(delaySec, 3);
+          const directThumUrl = `https://image.thum.io/get/wait/${waitTime}/noanimate/width/${targetW}/crop/${targetH}/${cleanUrl}`;
           const directRes = await fetch(directThumUrl);
           if (directRes.ok) {
             finalBlob = await directRes.blob();
@@ -720,10 +846,10 @@ window.addEventListener('message', (e) => {
       link.href = objectUrl;
       link.click();
     } catch (err: any) {
-      console.error('Screenshot error:', err);
       if (err.name === 'NotAllowedError' || err.message?.includes('Permission denied')) {
         setScreenshotError('Pengambilan tangkapan layar dibatalkan.');
       } else {
+        console.warn('Screenshot notice:', err?.message || err);
         setScreenshotError(err?.message || 'Gagal mengambil tangkapan layar.');
       }
     } finally {
@@ -1658,53 +1784,116 @@ window.addEventListener('message', (e) => {
               </div>
 
               {/* Mode Switcher & Settings */}
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 mb-3 bg-neutral-50 dark:bg-neutral-950 p-2.5 rounded-xl border border-neutral-100 dark:border-neutral-800 shrink-0">
-                <div className="flex items-center gap-1 bg-neutral-200/70 dark:bg-neutral-800 p-0.5 rounded-lg text-xs font-medium">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setScreenshotMode('device');
-                      executeScreenshot(screenshotPane, 'device', includeBezelMockup);
-                    }}
-                    className={`px-2.5 py-1 rounded-md transition-colors cursor-pointer ${
-                      screenshotMode === 'device'
-                        ? 'bg-white dark:bg-neutral-900 text-black dark:text-white shadow-xs font-semibold'
-                        : 'text-neutral-600 dark:text-neutral-400 hover:text-black dark:hover:text-white'
-                    }`}
-                  >
-                    Resolusi Perangkat
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setScreenshotMode('tab');
-                      executeScreenshot(screenshotPane, 'tab', false);
-                    }}
-                    className={`px-2.5 py-1 rounded-md transition-colors cursor-pointer ${
-                      screenshotMode === 'tab'
-                        ? 'bg-white dark:bg-neutral-900 text-black dark:text-white shadow-xs font-semibold'
-                        : 'text-neutral-600 dark:text-neutral-400 hover:text-black dark:hover:text-white'
-                    }`}
-                  >
-                    Tangkap Layar Tab (Localhost)
-                  </button>
+              <div className="flex flex-col gap-2.5 mb-3 bg-neutral-50 dark:bg-neutral-950 p-2.5 rounded-xl border border-neutral-100 dark:border-neutral-800 shrink-0">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                  <div className="flex items-center gap-1 bg-neutral-200/70 dark:bg-neutral-800 p-0.5 rounded-lg text-xs font-medium">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setScreenshotMode('device');
+                        executeScreenshot(screenshotPane, 'device', includeBezelMockup, screenshotDelay);
+                      }}
+                      className={`px-2.5 py-1 rounded-md transition-colors cursor-pointer ${
+                        screenshotMode === 'device'
+                          ? 'bg-white dark:bg-neutral-900 text-black dark:text-white shadow-xs font-semibold'
+                          : 'text-neutral-600 dark:text-neutral-400 hover:text-black dark:hover:text-white'
+                      }`}
+                    >
+                      Resolusi Perangkat
+                    </button>
+                    {isScreenCaptureSupported && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setScreenshotMode('tab');
+                          executeScreenshot(screenshotPane, 'tab', false, screenshotDelay);
+                        }}
+                        className={`px-2.5 py-1 rounded-md transition-colors cursor-pointer ${
+                          screenshotMode === 'tab'
+                            ? 'bg-white dark:bg-neutral-900 text-black dark:text-white shadow-xs font-semibold'
+                            : 'text-neutral-600 dark:text-neutral-400 hover:text-black dark:hover:text-white'
+                        }`}
+                      >
+                        Tangkap Layar Tab (Localhost)
+                      </button>
+                    )}
+                  </div>
+
+                  {screenshotMode === 'device' && (
+                    <label className="flex items-center gap-2 text-xs text-neutral-600 dark:text-neutral-300 cursor-pointer select-none bg-neutral-100 dark:bg-neutral-800/80 px-2.5 py-1 rounded-lg border border-neutral-200 dark:border-neutral-700">
+                      <input
+                        type="checkbox"
+                        checked={includeBezelMockup}
+                        onChange={(e) => {
+                          const checked = e.target.checked;
+                          setIncludeBezelMockup(checked);
+                          executeScreenshot(screenshotPane, 'device', checked, screenshotDelay);
+                        }}
+                        className="rounded border-neutral-300 text-black focus:ring-0 w-3.5 h-3.5 cursor-pointer"
+                      />
+                      <span className="font-medium">Bingkai Mockup</span>
+                      <span className="text-[10px] text-neutral-400 dark:text-neutral-500">
+                        ({includeBezelMockup ? 'Dengan Bingkai' : 'Murni Website'})
+                      </span>
+                    </label>
+                  )}
                 </div>
 
-                {screenshotMode === 'device' && (
-                  <label className="flex items-center gap-2 text-xs text-neutral-600 dark:text-neutral-300 cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={includeBezelMockup}
-                      onChange={(e) => {
-                        const checked = e.target.checked;
-                        setIncludeBezelMockup(checked);
-                        executeScreenshot(screenshotPane, 'device', checked);
-                      }}
-                      className="rounded border-neutral-300 text-black focus:ring-0 w-3.5 h-3.5"
-                    />
-                    <span>Bingkai Mockup (Bezel)</span>
-                  </label>
-                )}
+                {/* Delay Setting (User-Adjustable in Seconds) */}
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-neutral-200/60 dark:border-neutral-800/80 text-xs">
+                  <div className="flex items-center gap-1.5 text-neutral-700 dark:text-neutral-300">
+                    <Timer size={14} className="text-blue-600 dark:text-blue-400 shrink-0" />
+                    <span className="font-medium">Jeda Waktu Render (Delay):</span>
+                    <span className="text-[11px] text-neutral-500 dark:text-neutral-400">
+                      {screenshotDelay === 0 ? 'Instan (0 detik)' : `${screenshotDelay} detik (tunggu animasi/elemen dinamis)`}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
+                    {/* Quick Presets */}
+                    <div className="flex items-center gap-1 bg-neutral-200/60 dark:bg-neutral-800 p-0.5 rounded-lg">
+                      {[0, 1, 2, 3, 5].map((sec) => (
+                        <button
+                          key={sec}
+                          type="button"
+                          onClick={() => {
+                            setScreenshotDelay(sec);
+                            executeScreenshot(screenshotPane, screenshotMode, includeBezelMockup, sec);
+                          }}
+                          className={`px-2 py-0.5 rounded text-[11px] font-mono transition-colors cursor-pointer ${
+                            screenshotDelay === sec
+                              ? 'bg-blue-600 text-white font-bold shadow-xs'
+                              : 'text-neutral-600 dark:text-neutral-300 hover:text-black dark:hover:text-white'
+                          }`}
+                          title={sec === 0 ? 'Tangkapan instan tanpa jeda' : `Beri jeda ${sec} detik sebelum foto diambil`}
+                        >
+                          {sec}s
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Custom Input Stepper */}
+                    <div className="flex items-center gap-1 bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 px-1.5 py-0.5 rounded-md">
+                      <input
+                        type="number"
+                        min="0"
+                        max="10"
+                        step="1"
+                        value={screenshotDelay}
+                        onChange={(e) => {
+                          const val = Math.min(Math.max(parseInt(e.target.value) || 0, 0), 10);
+                          setScreenshotDelay(val);
+                        }}
+                        onBlur={() => {
+                          executeScreenshot(screenshotPane, screenshotMode, includeBezelMockup, screenshotDelay);
+                        }}
+                        className="w-8 text-center text-xs font-mono bg-transparent border-0 p-0 focus:ring-0 text-black dark:text-white"
+                        title="Masukkan jeda detik kustom (0 - 10)"
+                      />
+                      <span className="text-[10px] text-neutral-400">detik</span>
+                    </div>
+                  </div>
+                </div>
               </div>
 
               {/* Main Content Area */}
@@ -1712,10 +1901,24 @@ window.addEventListener('message', (e) => {
                 {/* Loading State */}
                 {(isCapturing || isCapturing2) && (
                   <div className="flex flex-col items-center justify-center p-8 bg-neutral-50 dark:bg-neutral-950 rounded-xl border border-neutral-100 dark:border-neutral-800 text-center space-y-3 min-h-[220px]">
-                    <Loader2 size={32} className="animate-spin text-emerald-600 dark:text-emerald-400" />
+                    <div className="relative flex items-center justify-center">
+                      <Loader2 size={36} className="animate-spin text-blue-600 dark:text-blue-400" />
+                      {countdownRemaining !== null && countdownRemaining > 0 && (
+                        <span className="absolute font-mono font-bold text-xs text-blue-600 dark:text-blue-400">
+                          {countdownRemaining}
+                        </span>
+                      )}
+                    </div>
                     <div>
-                      <p className="font-semibold text-sm">Mengambil Tangkapan Layar...</p>
+                      <p className="font-semibold text-sm">
+                        {countdownRemaining !== null && countdownRemaining > 0
+                          ? `Menunggu Animasi Render (${countdownRemaining} detik)...`
+                          : 'Mengambil Tangkapan Layar...'}
+                      </p>
                       <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+                        {screenshotDelay > 0 && (
+                          <span className="text-blue-600 dark:text-blue-400 font-medium">Jeda {screenshotDelay} detik aktif • </span>
+                        )}
                         Memproses resolusi {getDeviceDimensions(screenshotPane).targetW} × {getDeviceDimensions(screenshotPane).targetH} px
                       </p>
                     </div>
@@ -1729,7 +1932,7 @@ window.addEventListener('message', (e) => {
                       <AlertCircle size={16} className="shrink-0 mt-0.5" />
                       <span>{screenshotError}</span>
                     </div>
-                    {screenshotMode === 'device' && (
+                    {screenshotMode === 'device' && isScreenCaptureSupported && (
                       <div className="pt-2 border-t border-red-200/60 dark:border-red-900/60 flex items-center justify-between gap-2">
                         <span className="text-red-600 dark:text-red-400 text-[11px]">
                           Jika website berjalan di localhost/port lokal, gunakan mode tangkap tab.
@@ -1738,11 +1941,28 @@ window.addEventListener('message', (e) => {
                           type="button"
                           onClick={() => {
                             setScreenshotMode('tab');
-                            executeScreenshot(screenshotPane, 'tab', false);
+                            executeScreenshot(screenshotPane, 'tab', false, screenshotDelay);
                           }}
                           className="px-2.5 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-[11px] font-medium shrink-0 cursor-pointer"
                         >
                           Coba Tangkap Tab
+                        </button>
+                      </div>
+                    )}
+                    {screenshotMode === 'tab' && (
+                      <div className="pt-2 border-t border-red-200/60 dark:border-red-900/60 flex items-center justify-between gap-2">
+                        <span className="text-red-600 dark:text-red-400 text-[11px]">
+                          Ingin mengambil tangkapan layar otomatis langsung dari server?
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setScreenshotMode('device');
+                            executeScreenshot(screenshotPane, 'device', includeBezelMockup, screenshotDelay);
+                          }}
+                          className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-[11px] font-medium shrink-0 cursor-pointer"
+                        >
+                          Gunakan Resolusi Perangkat
                         </button>
                       </div>
                     )}
@@ -1764,6 +1984,12 @@ window.addEventListener('message', (e) => {
                         <span>{screenshotResult.width} × {screenshotResult.height} px</span>
                         <span>•</span>
                         <span>{screenshotResult.sizeKb} KB</span>
+                        {screenshotDelay > 0 && (
+                          <>
+                            <span>•</span>
+                            <span className="text-blue-300 font-sans">{screenshotDelay}s delay</span>
+                          </>
+                        )}
                       </div>
                     </div>
 
@@ -1780,7 +2006,7 @@ window.addEventListener('message', (e) => {
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => executeScreenshot(screenshotPane, screenshotMode, includeBezelMockup)}
+                    onClick={() => executeScreenshot(screenshotPane, screenshotMode, includeBezelMockup, screenshotDelay)}
                     disabled={isCapturing || isCapturing2}
                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-neutral-200 dark:border-neutral-800 text-xs font-medium text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors cursor-pointer disabled:opacity-50"
                   >
@@ -1835,7 +2061,260 @@ window.addEventListener('message', (e) => {
             </div>
           </div>
         )}
+
+        {/* Modern Panduan & Pintasan Modal */}
+        {showHelpModal && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-50 flex items-center justify-center p-3 sm:p-4 animate-in fade-in">
+            <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-2xl max-w-lg w-full p-4 sm:p-5 shadow-2xl animate-in zoom-in-95 text-neutral-900 dark:text-neutral-100 max-h-[90vh] flex flex-col">
+              {/* Header */}
+              <div className="flex justify-between items-start mb-3 pb-3 border-b border-neutral-100 dark:border-neutral-800 shrink-0">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-2 bg-blue-100 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 rounded-lg">
+                    <Sparkles size={18} />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-base flex items-center gap-2">
+                      <span>Panduan & Pintasan</span>
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300 font-semibold font-mono">v2.5</span>
+                    </h3>
+                    <p className="text-xs text-neutral-500 dark:text-neutral-400">Pintasan keyboard & tips produktivitas Responsive Cek</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowHelpModal(false)}
+                  className="text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 p-1 rounded-md transition-colors cursor-pointer"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* Content Scrollable */}
+              <div className="space-y-3.5 overflow-y-auto pr-1 text-xs text-neutral-600 dark:text-neutral-300 leading-relaxed">
+                {/* Keyboard Shortcuts Table */}
+                <div className="space-y-2">
+                  <span className="font-bold text-neutral-900 dark:text-neutral-100 flex items-center gap-1.5 text-xs">
+                    <Keyboard size={14} className="text-blue-500" />
+                    <span>Pintasan Keyboard Global</span>
+                  </span>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 font-mono text-[11px]">
+                    <div className="flex items-center justify-between p-2 rounded-lg bg-neutral-50 dark:bg-neutral-950 border border-neutral-100 dark:border-neutral-800">
+                      <span className="font-sans text-neutral-700 dark:text-neutral-300">Buka / Tutup Panduan</span>
+                      <kbd className="px-2 py-0.5 bg-neutral-200 dark:bg-neutral-800 rounded font-bold text-black dark:text-white border border-neutral-300 dark:border-neutral-700">?</kbd>
+                    </div>
+                    <div className="flex items-center justify-between p-2 rounded-lg bg-neutral-50 dark:bg-neutral-950 border border-neutral-100 dark:border-neutral-800">
+                      <span className="font-sans text-neutral-700 dark:text-neutral-300">Tutup Modal Aktif</span>
+                      <kbd className="px-2 py-0.5 bg-neutral-200 dark:bg-neutral-800 rounded font-bold text-black dark:text-white border border-neutral-300 dark:border-neutral-700">Esc</kbd>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Core Features Overview */}
+                <div className="space-y-2 pt-1 border-t border-neutral-100 dark:border-neutral-800">
+                  <span className="font-bold text-neutral-900 dark:text-neutral-100 flex items-center gap-1.5 text-xs">
+                    <Sparkles size={14} className="text-amber-500" />
+                    <span>Fitur & Kemampuan Unggulan</span>
+                  </span>
+
+                  <div className="space-y-2">
+                    <div className="p-2.5 rounded-xl bg-neutral-50 dark:bg-neutral-950 border border-neutral-100 dark:border-neutral-800 space-y-1">
+                      <div className="font-semibold text-neutral-900 dark:text-neutral-100 flex items-center gap-1.5">
+                        <MonitorSmartphone size={13} className="text-blue-500" />
+                        <span>Preset Lengkap & Viewport Drag Bebas</span>
+                      </div>
+                      <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
+                        Uji berbagai model iPhone, Android, iPad, MacBook, hingga Desktop 4K, atau tarik handle di sisi kanan viewport untuk melihat fluid breakpoint secara real-time.
+                      </p>
+                    </div>
+
+                    <div className="p-2.5 rounded-xl bg-neutral-50 dark:bg-neutral-950 border border-neutral-100 dark:border-neutral-800 space-y-1">
+                      <div className="font-semibold text-neutral-900 dark:text-neutral-100 flex items-center gap-1.5">
+                        <Link2 size={13} className="text-purple-500" />
+                        <span>Sinkronisasi Scroll Dua Layar (Split View)</span>
+                      </div>
+                      <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
+                        Bandingkan versi mobile dan desktop secara berdampingan. Kedua layar akan bergerak secara presisi saat salah satu digulir.
+                      </p>
+                    </div>
+
+                    <div className="p-2.5 rounded-xl bg-neutral-50 dark:bg-neutral-950 border border-neutral-100 dark:border-neutral-800 space-y-1">
+                      <div className="font-semibold text-neutral-900 dark:text-neutral-100 flex items-center gap-1.5">
+                        <Camera size={13} className="text-emerald-500" />
+                        <span>Tangkapan Layar Otomatis dengan Jeda Waktu</span>
+                      </div>
+                      <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
+                        Ambil screenshot resolusi murni atau mockup frame perangkat. Gunakan opsi jeda (delay 0–10 detik) agar animasi dan font selesai dimuat sempurna.
+                      </p>
+                    </div>
+
+                    <div className="p-2.5 rounded-xl bg-neutral-50 dark:bg-neutral-950 border border-neutral-100 dark:border-neutral-800 space-y-1">
+                      <div className="font-semibold text-neutral-900 dark:text-neutral-100 flex items-center gap-1.5">
+                        <Pipette size={13} className="text-pink-500" />
+                        <span>Color Eyedropper & Inspeksi Warna</span>
+                      </div>
+                      <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
+                        Ekstrak warna dari mana saja di layar dan salin otomatis format HEX, RGB, atau HSL dengan satu klik.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Footer Modal */}
+              <div className="mt-4 pt-3 border-t border-neutral-100 dark:border-neutral-800 flex items-center justify-between shrink-0">
+                <span className="text-[11px] text-neutral-400">Tekan <kbd className="font-mono bg-neutral-200 dark:bg-neutral-800 px-1 py-0.5 rounded text-[10px]">Esc</kbd> untuk menutup</span>
+                <button
+                  type="button"
+                  onClick={() => setShowHelpModal(false)}
+                  className="bg-black dark:bg-white text-white dark:text-black px-4 py-1.5 rounded-lg text-xs font-semibold hover:opacity-90 transition-opacity cursor-pointer"
+                >
+                  Selesai
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
+
+      {/* Modern Application Footer / Status Bar */}
+      <footer className="bg-white/95 dark:bg-neutral-900/95 backdrop-blur-md border-t border-neutral-200 dark:border-neutral-800 px-3 sm:px-4 py-2 z-20 shrink-0 transition-colors text-xs select-none">
+        <div className="flex flex-wrap items-center justify-between gap-y-2 gap-x-4 max-w-full">
+          
+          {/* Left Section: Live System Status & Active Target URL */}
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+            {/* Status Indicator */}
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200/80 dark:border-emerald-800/80 text-emerald-700 dark:text-emerald-400 font-medium text-[11px] shrink-0 shadow-2xs">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              </span>
+              <span className="font-semibold tracking-tight">Live</span>
+            </div>
+
+            {/* Active URL Chip */}
+            <div className="flex items-center gap-1.5 min-w-0 bg-neutral-100 dark:bg-neutral-800/80 border border-neutral-200/80 dark:border-neutral-700/80 px-2.5 py-1 rounded-lg max-w-[170px] xs:max-w-[220px] sm:max-w-xs md:max-w-sm transition-colors">
+              <Globe size={12} className="text-neutral-500 dark:text-neutral-400 shrink-0" />
+              <span className="truncate font-mono text-[11px] text-neutral-700 dark:text-neutral-300">
+                {url}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  navigator.clipboard?.writeText(url);
+                  setCopiedUrlFeedback(true);
+                  setTimeout(() => setCopiedUrlFeedback(false), 1800);
+                }}
+                className="text-neutral-400 hover:text-black dark:hover:text-white transition-colors shrink-0 ml-0.5 p-0.5 rounded hover:bg-neutral-200/60 dark:hover:bg-neutral-700 cursor-pointer"
+                title="Salin URL aktif"
+              >
+                {copiedUrlFeedback ? <Check size={11} className="text-emerald-500" /> : <Copy size={11} />}
+              </button>
+            </div>
+
+            {/* Protocol Badge */}
+            <span className="hidden xl:inline-flex items-center gap-1 text-[10px] font-mono uppercase tracking-wider text-neutral-500 dark:text-neutral-400 bg-neutral-100 dark:bg-neutral-800/90 px-1.5 py-0.5 rounded border border-neutral-200/70 dark:border-neutral-700/70">
+              {url.startsWith('https://') ? 'HTTPS' : url.includes('localhost') ? 'LOCAL' : 'HTTP'}
+            </span>
+          </div>
+
+          {/* Center Section: Real-Time Viewport Telemetry */}
+          <div className="hidden md:flex items-center gap-2 text-[11px]">
+            {/* Pane 1 Telemetry */}
+            {(() => {
+              const p1 = getDeviceDimensions(1);
+              return (
+                <div className="flex items-center gap-1.5 bg-neutral-100/90 dark:bg-neutral-800/90 px-2.5 py-1 rounded-lg border border-neutral-200 dark:border-neutral-700 font-mono text-neutral-700 dark:text-neutral-300 shadow-2xs">
+                  <span className="p-0.5 rounded bg-white dark:bg-neutral-900 border border-neutral-200/60 dark:border-neutral-700/60 text-neutral-700 dark:text-neutral-300">
+                    {p1.activeDev === 'mobile' ? <Smartphone size={12} className="text-blue-500" /> :
+                     p1.activeDev === 'tablet' ? <Tablet size={12} className="text-purple-500" /> :
+                     p1.activeDev === 'laptop' ? <Laptop size={12} className="text-amber-500" /> :
+                     <Monitor size={12} className="text-emerald-500" />}
+                  </span>
+                  <span className="font-sans font-medium text-neutral-900 dark:text-neutral-100">{p1.devName}</span>
+                  <span className="text-neutral-300 dark:text-neutral-600">•</span>
+                  <span className="font-semibold text-neutral-900 dark:text-neutral-100">{p1.targetW}×{p1.targetH} px</span>
+                  <span className="text-neutral-300 dark:text-neutral-600">•</span>
+                  <span className="text-neutral-500 dark:text-neutral-400 font-sans">{zoom}%</span>
+                </div>
+              );
+            })()}
+
+            {/* Split & Sync Connection Badge */}
+            {isSplit && (
+              <>
+                <div className={`flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-semibold tracking-wider uppercase border transition-colors shadow-2xs ${
+                  isSyncScroll 
+                    ? 'bg-blue-50 dark:bg-blue-950/60 border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300' 
+                    : 'bg-neutral-100 dark:bg-neutral-800 border-neutral-200 dark:border-neutral-700 text-neutral-500'
+                }`}>
+                  <Link2 size={11} className={isSyncScroll ? 'text-blue-500 animate-pulse' : 'text-neutral-400'} />
+                  <span>{isSyncScroll ? 'Sync ON' : 'Sync OFF'}</span>
+                </div>
+
+                {/* Pane 2 Telemetry */}
+                {(() => {
+                  const p2 = getDeviceDimensions(2);
+                  return (
+                    <div className="flex items-center gap-1.5 bg-neutral-100/90 dark:bg-neutral-800/90 px-2.5 py-1 rounded-lg border border-neutral-200 dark:border-neutral-700 font-mono text-neutral-700 dark:text-neutral-300 shadow-2xs">
+                      <span className="p-0.5 rounded bg-white dark:bg-neutral-900 border border-neutral-200/60 dark:border-neutral-700/60 text-neutral-700 dark:text-neutral-300">
+                        {p2.activeDev === 'mobile' ? <Smartphone size={12} className="text-blue-500" /> :
+                         p2.activeDev === 'tablet' ? <Tablet size={12} className="text-purple-500" /> :
+                         p2.activeDev === 'laptop' ? <Laptop size={12} className="text-amber-500" /> :
+                         <Monitor size={12} className="text-emerald-500" />}
+                      </span>
+                      <span className="font-sans font-medium text-neutral-900 dark:text-neutral-100">{p2.devName}</span>
+                      <span className="text-neutral-300 dark:text-neutral-600">•</span>
+                      <span className="font-semibold text-neutral-900 dark:text-neutral-100">{p2.targetW}×{p2.targetH} px</span>
+                      <span className="text-neutral-300 dark:text-neutral-600">•</span>
+                      <span className="text-neutral-500 dark:text-neutral-400 font-sans">{zoom2}%</span>
+                    </div>
+                  );
+                })()}
+              </>
+            )}
+          </div>
+
+          {/* Right Section: Quick Actions & Help Modal */}
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 ml-auto sm:ml-0">
+            {/* Quick Screenshot Trigger */}
+            <button
+              type="button"
+              onClick={() => handleOpenScreenshotModal(1)}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-200 border border-neutral-200/80 dark:border-neutral-700 transition-colors font-medium cursor-pointer shadow-2xs"
+              title="Buka dialog tangkapan layar responsif"
+            >
+              <Camera size={13} className="text-neutral-600 dark:text-neutral-300" />
+              <span className="hidden sm:inline text-[11px]">Screenshot</span>
+            </button>
+
+            {/* Sync Scroll API snippet trigger if split */}
+            {isSplit && (
+              <button
+                type="button"
+                onClick={() => setShowSyncInfoModal(true)}
+                className="flex items-center gap-1 px-2 py-1 rounded-lg text-neutral-600 dark:text-neutral-400 hover:text-black dark:hover:text-white hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors cursor-pointer border border-transparent hover:border-neutral-200 dark:hover:border-neutral-700"
+                title="Lihat petunjuk API Sync Scroll"
+              >
+                <Code size={13} />
+                <span className="hidden lg:inline text-[11px]">Sync Code</span>
+              </button>
+            )}
+
+            {/* Help & Shortcuts Guide Trigger */}
+            <button
+              type="button"
+              onClick={() => setShowHelpModal(true)}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-black text-white dark:bg-white dark:text-black hover:opacity-90 transition-opacity font-medium shadow-xs cursor-pointer text-[11px]"
+              title="Buka panduan & pintasan (Tekan ?)"
+            >
+              <Keyboard size={13} />
+              <span>Panduan & Pintasan</span>
+              <kbd className="hidden sm:inline-block font-mono text-[9px] bg-white/20 dark:bg-black/20 px-1 py-0.2 rounded">?</kbd>
+            </button>
+          </div>
+
+        </div>
+      </footer>
     </div>
   );
 }

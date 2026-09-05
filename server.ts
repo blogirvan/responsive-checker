@@ -76,6 +76,7 @@ async function startServer() {
     const targetUrl = req.query.url as string;
     const width = Math.min(Math.max(parseInt(req.query.width as string) || 1200, 320), 2560);
     const height = Math.min(Math.max(parseInt(req.query.height as string) || 800, 320), 2560);
+    const delay = Math.min(Math.max(parseInt(req.query.delay as string) || 0, 0), 10);
 
     if (!targetUrl) {
       res.status(400).json({ ok: false, error: 'URL target diperlukan' });
@@ -87,19 +88,49 @@ async function startServer() {
       formattedUrl = `https://${formattedUrl}`;
     }
 
-    try {
-      const thumUrl = `https://image.thum.io/get/width/${width}/crop/${height}/${formattedUrl}`;
-      const response = await fetch(thumUrl, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        },
-      });
+    const isMobile = width < 768;
 
-      if (!response.ok) {
-        throw new Error(`Screenshot service HTTP ${response.status}`);
+    try {
+      let arrayBuffer: ArrayBuffer | null = null;
+
+      // Strategi 1: Microlink Headless Chrome (Eksekusi JavaScript penuh, support modern SPAs)
+      try {
+        let microlinkUrl = `https://api.microlink.io?url=${encodeURIComponent(formattedUrl)}&screenshot=true&meta=false&embed=screenshot.url&viewport.width=${width}&viewport.height=${height}&viewport.isMobile=${isMobile}&viewport.hasTouch=${isMobile}`;
+        if (delay > 0) {
+          microlinkUrl += `&waitForTimeout=${delay * 1000}`;
+        }
+        const microRes = await fetch(microlinkUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          },
+        });
+
+        if (microRes.ok && microRes.headers.get('content-type')?.includes('image')) {
+          arrayBuffer = await microRes.arrayBuffer();
+        }
+      } catch (microErr) {
+        console.warn('Microlink error in server.ts, trying fallback:', microErr);
       }
 
-      const arrayBuffer = await response.arrayBuffer();
+      // Strategi 2: Thum.io dengan parameter wait (Memberi waktu tunggu agar JS website me-render halaman)
+      if (!arrayBuffer) {
+        const waitTime = Math.max(delay, 3);
+        const thumUrl = `https://image.thum.io/get/wait/${waitTime}/noanimate/width/${width}/crop/${height}/${formattedUrl}`;
+        const response = await fetch(thumUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          },
+        });
+
+        if (response.ok) {
+          arrayBuffer = await response.arrayBuffer();
+        }
+      }
+
+      if (!arrayBuffer) {
+        throw new Error('Semua penyedia tangkapan layar gagal mengambil pratinjau website.');
+      }
+
       const buffer = Buffer.from(arrayBuffer);
 
       res.setHeader('Content-Type', 'image/png');
