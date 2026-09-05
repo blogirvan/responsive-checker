@@ -34,9 +34,117 @@ import {
   Link2,
   Unlink2,
   HelpCircle,
-  Code
+  Code,
+  Download,
+  Image as ImageIcon,
+  Layers
 } from 'lucide-react';
 import { DeviceDefinition, DeviceType } from './types';
+
+// Helper to composite website screenshot into an authentic device bezel mockup
+async function createMockupImage(imgBlob: Blob, deviceType: DeviceType, isRotated: boolean): Promise<Blob> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    const objectUrl = URL.createObjectURL(imgBlob);
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        resolve(imgBlob);
+        return;
+      }
+
+      const imgW = img.width;
+      const imgH = img.height;
+
+      const padX = deviceType === 'mobile' ? 20 : deviceType === 'tablet' ? 26 : 32;
+      const padY = deviceType === 'mobile' ? 28 : deviceType === 'tablet' ? 32 : 36;
+      const bottomExtra = (deviceType === 'laptop' || deviceType === 'desktop') ? 24 : 0;
+
+      canvas.width = imgW + padX * 2;
+      canvas.height = imgH + padY * 2 + bottomExtra;
+
+      // Outer bezel body
+      ctx.fillStyle = '#18181b';
+      const radius = deviceType === 'mobile' ? 40 : deviceType === 'tablet' ? 28 : 16;
+
+      ctx.beginPath();
+      if (typeof ctx.roundRect === 'function') {
+        ctx.roundRect(0, 0, canvas.width, canvas.height - bottomExtra, radius);
+      } else {
+        ctx.rect(0, 0, canvas.width, canvas.height - bottomExtra);
+      }
+      ctx.fill();
+
+      // Outer metallic rim
+      ctx.strokeStyle = '#3f3f46';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+
+      // Draw screen content
+      ctx.save();
+      ctx.beginPath();
+      const innerRadius = Math.max(radius - 14, 4);
+      if (typeof ctx.roundRect === 'function') {
+        ctx.roundRect(padX, padY, imgW, imgH, innerRadius);
+      } else {
+        ctx.rect(padX, padY, imgW, imgH);
+      }
+      ctx.clip();
+      ctx.drawImage(img, padX, padY, imgW, imgH);
+      ctx.restore();
+
+      // Mobile dynamic island
+      if (deviceType === 'mobile' && !isRotated) {
+        ctx.fillStyle = '#09090b';
+        ctx.beginPath();
+        const islandW = Math.min(imgW * 0.28, 90);
+        const islandH = 18;
+        if (typeof ctx.roundRect === 'function') {
+          ctx.roundRect((canvas.width - islandW) / 2, padY + 8, islandW, islandH, islandH / 2);
+        } else {
+          ctx.rect((canvas.width - islandW) / 2, padY + 8, islandW, islandH);
+        }
+        ctx.fill();
+      }
+
+      // Laptop / Desktop base
+      if (deviceType === 'laptop' || deviceType === 'desktop') {
+        ctx.fillStyle = '#27272a';
+        ctx.beginPath();
+        const baseW = canvas.width - 24;
+        const baseX = 12;
+        const baseY = canvas.height - bottomExtra - 2;
+        if (typeof ctx.roundRect === 'function') {
+          ctx.roundRect(baseX, baseY, baseW, bottomExtra + 2, [0, 0, 10, 10]);
+        } else {
+          ctx.rect(baseX, baseY, baseW, bottomExtra + 2);
+        }
+        ctx.fill();
+
+        // Notch in laptop base
+        ctx.fillStyle = '#52525b';
+        ctx.beginPath();
+        if (typeof ctx.roundRect === 'function') {
+          ctx.roundRect(canvas.width / 2 - 30, baseY, 60, 5, [0, 0, 4, 4]);
+        } else {
+          ctx.rect(canvas.width / 2 - 30, baseY, 60, 5);
+        }
+        ctx.fill();
+      }
+
+      canvas.toBlob((blob) => {
+        resolve(blob || imgBlob);
+      }, 'image/png');
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(imgBlob);
+    };
+    img.src = objectUrl;
+  });
+}
 
 function hexToRgb(hex: string) {
   hex = hex.replace(/^#/, '');
@@ -181,6 +289,22 @@ export default function App() {
   });
   const [showSyncInfoModal, setShowSyncInfoModal] = useState(false);
   const [copiedSnippet, setCopiedSnippet] = useState(false);
+
+  // Screenshot Management State
+  const [showScreenshotModal, setShowScreenshotModal] = useState(false);
+  const [screenshotPane, setScreenshotPane] = useState<1 | 2>(1);
+  const [screenshotMode, setScreenshotMode] = useState<'device' | 'tab'>('device');
+  const [includeBezelMockup, setIncludeBezelMockup] = useState(false);
+  const [screenshotResult, setScreenshotResult] = useState<{
+    url: string;
+    blob: Blob;
+    width: number;
+    height: number;
+    deviceName: string;
+    sizeKb: number;
+  } | null>(null);
+  const [screenshotError, setScreenshotError] = useState<string | null>(null);
+  const [copiedScreenshot, setCopiedScreenshot] = useState(false);
 
   const iframeRef1 = useRef<HTMLIFrameElement>(null);
   const iframeRef2 = useRef<HTMLIFrameElement>(null);
@@ -443,33 +567,193 @@ window.addEventListener('message', (e) => {
     window.open(url, '_blank', 'noopener,noreferrer');
   };
 
-  const handleScreenshot = async (pane: 1 | 2) => {
-    const ref = pane === 1 ? containerRef : containerRef2;
-    if (!ref.current) return;
-    
+  const getDeviceDimensions = (pane: 1 | 2) => {
+    const activeDev = pane === 1 ? activeDevice : activeDevice2;
+    const isRot = pane === 1 ? isRotated : isRotated2;
+    const cWidth = pane === 1 ? customWidth : customWidth2;
+    const cHeight = pane === 1 ? customHeight : customHeight2;
+    const resW = pane === 1 ? responsiveWidth : responsiveWidth2;
+
+    let targetW = 1024;
+    let targetH = 800;
+    let devName = 'Responsive';
+
+    if (activeDev === 'custom') {
+      targetW = isRot ? cHeight : cWidth;
+      targetH = isRot ? cWidth : cHeight;
+      devName = `Custom (${targetW}×${targetH})`;
+    } else if (activeDev === 'responsive') {
+      targetW = typeof resW === 'number' ? resW : 1024;
+      targetH = 800;
+      devName = `Responsive (${targetW}px)`;
+    } else {
+      const dev = DEVICES.find(d => d.id === activeDev) || DEVICES[2];
+      const baseW = typeof dev.width === 'number' ? dev.width : 1024;
+      const baseH = typeof dev.height === 'number' ? dev.height : 768;
+      targetW = isRot ? baseH : baseW;
+      targetH = isRot ? baseW : baseH;
+      devName = dev.name;
+    }
+
+    return { targetW, targetH, devName, activeDev, isRot };
+  };
+
+  const handleOpenScreenshotModal = (pane: 1 | 2) => {
+    setScreenshotPane(pane);
+    setShowScreenshotModal(true);
+    setScreenshotError(null);
+    setScreenshotResult(null);
+
+    // Otomatis pakai mode 'device' dan sync bezel
+    const useBezel = showBezel;
+    setIncludeBezelMockup(useBezel);
+
+    // Langsung mulai proses pengambilan tangkapan layar
+    executeScreenshot(pane, screenshotMode, useBezel);
+  };
+
+  const executeScreenshot = async (
+    pane: 1 | 2,
+    mode: 'device' | 'tab' = screenshotMode,
+    withBezel: boolean = includeBezelMockup
+  ) => {
     if (pane === 1) setIsCapturing(true);
     else setIsCapturing2(true);
-    
+
+    setScreenshotError(null);
+    setCopiedScreenshot(false);
+
+    const { targetW, targetH, devName, activeDev, isRot } = getDeviceDimensions(pane);
+
     try {
-      const canvas = await html2canvas(ref.current, {
-        useCORS: true,
-        backgroundColor: null,
+      let finalBlob: Blob | null = null;
+
+      if (mode === 'tab') {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+          throw new Error('Peramban ini tidak mendukung Screen Capture API.');
+        }
+
+        const stream = await navigator.mediaDevices.getDisplayMedia({
+          video: { displaySurface: 'browser' } as any,
+          audio: false,
+        });
+
+        const track = stream.getVideoTracks()[0];
+        const video = document.createElement('video');
+        video.srcObject = stream;
+        video.muted = true;
+        await video.play();
+
+        const canvas = document.createElement('canvas');
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        }
+
+        track.stop();
+        stream.getTracks().forEach(t => t.stop());
+
+        finalBlob = await new Promise<Blob | null>(res => canvas.toBlob(res, 'image/png'));
+        if (!finalBlob) throw new Error('Gagal mengekstrak gambar dari peramban.');
+      } else {
+        // Mode Device Viewport Capture
+        let cleanUrl = url.trim();
+        if (!/^https?:\/\//i.test(cleanUrl)) {
+          cleanUrl = `https://${cleanUrl}`;
+        }
+
+        const isLocal = cleanUrl.includes('localhost') || cleanUrl.includes('127.0.0.1');
+        if (isLocal) {
+          throw new Error('Website lokal (localhost) tidak dapat diakses server luar. Silakan beralih ke tab opsi "Tangkap Layar Tab Browser" di atas.');
+        }
+
+        // Coba endpoint backend /api/screenshot terlebih dahulu
+        try {
+          const apiRes = await fetch(`/api/screenshot?url=${encodeURIComponent(cleanUrl)}&width=${targetW}&height=${targetH}`);
+          if (apiRes.ok && apiRes.headers.get('content-type')?.includes('image')) {
+            finalBlob = await apiRes.blob();
+          }
+        } catch (apiErr) {
+          console.warn('Backend screenshot endpoint tidak merespons, mencoba direct fallback:', apiErr);
+        }
+
+        // Fallback langsung ke service jika backend tidak tersedia
+        if (!finalBlob) {
+          const directThumUrl = `https://image.thum.io/get/width/${targetW}/crop/${targetH}/${cleanUrl}`;
+          const directRes = await fetch(directThumUrl);
+          if (directRes.ok) {
+            finalBlob = await directRes.blob();
+          } else {
+            throw new Error('Layanan tangkapan layar tidak dapat menjangkau website ini. Silakan coba mode "Tangkap Layar Tab Browser".');
+          }
+        }
+      }
+
+      // Jika opsi mockup bezel aktif pada mode device
+      if (withBezel && finalBlob && mode === 'device') {
+        finalBlob = await createMockupImage(finalBlob, activeDev, isRot);
+      }
+
+      if (!finalBlob) {
+        throw new Error('Gagal menghasilkan file gambar.');
+      }
+
+      const objectUrl = URL.createObjectURL(finalBlob);
+      const sizeKb = Math.round(finalBlob.size / 1024);
+
+      setScreenshotResult({
+        url: objectUrl,
+        blob: finalBlob,
+        width: targetW,
+        height: targetH,
+        deviceName: devName,
+        sizeKb,
       });
-      
-      const image = canvas.toDataURL('image/png', 1.0);
+
+      // Otomatis unduh file hasil screenshot
+      const safeDevName = devName.toLowerCase().replace(/[^a-z0-9]/g, '-');
+      const filename = `responsive-cek-${safeDevName}-${targetW}x${targetH}-${Date.now()}.png`;
       const link = document.createElement('a');
-      const dev = pane === 1 ? activeDevice : activeDevice2;
-      link.download = `responsive-cek-${dev}-${Date.now()}.png`;
-      link.href = image;
+      link.download = filename;
+      link.href = objectUrl;
       link.click();
-      
-      setShowCorsWarning(true);
-    } catch (error) {
-      console.error('Screenshot failed:', error);
-      alert('Failed to capture screenshot. The website might be blocking it.');
+    } catch (err: any) {
+      console.error('Screenshot error:', err);
+      if (err.name === 'NotAllowedError' || err.message?.includes('Permission denied')) {
+        setScreenshotError('Pengambilan tangkapan layar dibatalkan.');
+      } else {
+        setScreenshotError(err?.message || 'Gagal mengambil tangkapan layar.');
+      }
     } finally {
       if (pane === 1) setIsCapturing(false);
       else setIsCapturing2(false);
+    }
+  };
+
+  const downloadScreenshotResult = () => {
+    if (!screenshotResult) return;
+    const safeDevName = screenshotResult.deviceName.toLowerCase().replace(/[^a-z0-9]/g, '-');
+    const filename = `responsive-cek-${safeDevName}-${screenshotResult.width}x${screenshotResult.height}-${Date.now()}.png`;
+    const link = document.createElement('a');
+    link.download = filename;
+    link.href = screenshotResult.url;
+    link.click();
+  };
+
+  const copyScreenshotToClipboard = async () => {
+    if (!screenshotResult || !navigator.clipboard) return;
+    try {
+      if (window.ClipboardItem) {
+        await navigator.clipboard.write([
+          new ClipboardItem({ [screenshotResult.blob.type || 'image/png']: screenshotResult.blob })
+        ]);
+        setCopiedScreenshot(true);
+        setTimeout(() => setCopiedScreenshot(false), 2000);
+      }
+    } catch (err) {
+      console.error('Failed to copy screenshot to clipboard:', err);
     }
   };
 
@@ -1072,12 +1356,12 @@ window.addEventListener('message', (e) => {
               
               <div className="flex items-center gap-1 border-l border-neutral-200 dark:border-neutral-800 pl-2 shrink-0">
                 <button 
-                  onClick={() => handleScreenshot(1)}
+                  onClick={() => handleOpenScreenshotModal(1)}
                   disabled={isCapturing}
-                  className="p-1.5 sm:p-2 text-neutral-600 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800 hover:text-black dark:hover:text-white rounded-lg transition-colors disabled:opacity-50"
-                  title="Ambil tangkapan layar"
+                  className="p-1.5 sm:p-2 text-neutral-600 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800 hover:text-black dark:hover:text-white rounded-lg transition-colors disabled:opacity-50 cursor-pointer"
+                  title="Ambil tangkapan layar perangkat"
                 >
-                  {isCapturing ? <Loader2 size={16} className="animate-spin" /> : <Camera size={16} />}
+                  {isCapturing ? <Loader2 size={16} className="animate-spin text-emerald-600" /> : <Camera size={16} />}
                 </button>
                 <button 
                   onClick={() => setShowBezel(!showBezel)}
@@ -1108,12 +1392,12 @@ window.addEventListener('message', (e) => {
                   Tampilan 1
                 </span>
                 <button 
-                  onClick={() => handleScreenshot(1)}
+                  onClick={() => handleOpenScreenshotModal(1)}
                   disabled={isCapturing}
-                  className="p-1 text-neutral-500 dark:text-neutral-400 hover:text-black dark:hover:text-white rounded transition-colors disabled:opacity-50"
+                  className="p-1 text-neutral-500 dark:text-neutral-400 hover:text-black dark:hover:text-white rounded transition-colors disabled:opacity-50 cursor-pointer"
                   title="Tangkapan layar Tampilan 1"
                 >
-                  {isCapturing ? <Loader2 size={14} className="animate-spin" /> : <Camera size={14} />}
+                  {isCapturing ? <Loader2 size={14} className="animate-spin text-emerald-600" /> : <Camera size={14} />}
                 </button>
               </div>
               {renderDeviceControls(
@@ -1164,12 +1448,12 @@ window.addEventListener('message', (e) => {
                   Tampilan 2
                 </span>
                 <button 
-                  onClick={() => handleScreenshot(2)}
+                  onClick={() => handleOpenScreenshotModal(2)}
                   disabled={isCapturing2}
-                  className="p-1 text-neutral-500 dark:text-neutral-400 hover:text-black dark:hover:text-white rounded transition-colors disabled:opacity-50"
+                  className="p-1 text-neutral-500 dark:text-neutral-400 hover:text-black dark:hover:text-white rounded transition-colors disabled:opacity-50 cursor-pointer"
                   title="Tangkapan layar Tampilan 2"
                 >
-                  {isCapturing2 ? <Loader2 size={14} className="animate-spin" /> : <Camera size={14} />}
+                  {isCapturing2 ? <Loader2 size={14} className="animate-spin text-emerald-600" /> : <Camera size={14} />}
                 </button>
               </div>
               {renderDeviceControls(
@@ -1187,22 +1471,6 @@ window.addEventListener('message', (e) => {
 
       {/* Main Stage */}
       <div className="flex-1 relative overflow-hidden">
-        {/* CORS Warning Toast */}
-        {showCorsWarning && (
-          <div className="fixed sm:absolute top-4 left-4 right-4 sm:left-1/2 sm:-translate-x-1/2 bg-amber-50 dark:bg-amber-950 border border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-200 text-xs sm:text-sm p-3 rounded-xl z-50 shadow-xl flex items-start gap-3 max-w-md animate-in slide-in-from-top-4 fade-in">
-            <AlertCircle className="w-5 h-5 shrink-0 text-amber-500 mt-0.5" />
-            <div className="flex-1">
-              <p className="font-semibold mb-0.5">Tangkapan Layar Berhasil Dibuat</p>
-              <p className="text-amber-700/90 dark:text-amber-200/80 text-xs leading-relaxed">
-                Karena batasan keamanan peramban (CORS), website eksternal sering kali tampil kosong pada tangkapan canvas.
-              </p>
-            </div>
-            <button onClick={() => setShowCorsWarning(false)} className="text-amber-500 hover:text-amber-700 dark:hover:text-amber-300 p-1">
-              <X size={15} />
-            </button>
-          </div>
-        )}
-
         <main className="w-full h-full flex flex-col lg:flex-row bg-neutral-100 dark:bg-neutral-950 transition-colors overflow-hidden">
           {renderPreviewPane(1, activeDevice, customWidth, customHeight, isRotated, isLoading, setIsLoading, zoom, responsiveWidth, setResponsiveWidth, containerRef)}
           
@@ -1358,6 +1626,211 @@ window.addEventListener('message', (e) => {
                 >
                   Tutup
                 </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Responsive Screenshot Modal */}
+        {showScreenshotModal && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-50 flex items-center justify-center p-3 sm:p-4 animate-in fade-in">
+            <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-2xl max-w-xl w-full p-4 sm:p-5 shadow-2xl animate-in zoom-in-95 text-neutral-900 dark:text-neutral-100 max-h-[90vh] flex flex-col">
+              {/* Header */}
+              <div className="flex justify-between items-start mb-3 pb-3 border-b border-neutral-100 dark:border-neutral-800 shrink-0">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-2 bg-emerald-100 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 rounded-lg">
+                    <Camera size={18} />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-sm sm:text-base">Tangkapan Layar Resolusi Perangkat</h3>
+                    <p className="text-xs text-neutral-500 dark:text-neutral-400">
+                      {isSplit ? `Tampilan ${screenshotPane} • ` : ''}
+                      {getDeviceDimensions(screenshotPane).devName} ({getDeviceDimensions(screenshotPane).targetW} × {getDeviceDimensions(screenshotPane).targetH} px)
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowScreenshotModal(false)}
+                  className="text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 p-1 rounded-md transition-colors cursor-pointer"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* Mode Switcher & Settings */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 mb-3 bg-neutral-50 dark:bg-neutral-950 p-2.5 rounded-xl border border-neutral-100 dark:border-neutral-800 shrink-0">
+                <div className="flex items-center gap-1 bg-neutral-200/70 dark:bg-neutral-800 p-0.5 rounded-lg text-xs font-medium">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setScreenshotMode('device');
+                      executeScreenshot(screenshotPane, 'device', includeBezelMockup);
+                    }}
+                    className={`px-2.5 py-1 rounded-md transition-colors cursor-pointer ${
+                      screenshotMode === 'device'
+                        ? 'bg-white dark:bg-neutral-900 text-black dark:text-white shadow-xs font-semibold'
+                        : 'text-neutral-600 dark:text-neutral-400 hover:text-black dark:hover:text-white'
+                    }`}
+                  >
+                    Resolusi Perangkat
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setScreenshotMode('tab');
+                      executeScreenshot(screenshotPane, 'tab', false);
+                    }}
+                    className={`px-2.5 py-1 rounded-md transition-colors cursor-pointer ${
+                      screenshotMode === 'tab'
+                        ? 'bg-white dark:bg-neutral-900 text-black dark:text-white shadow-xs font-semibold'
+                        : 'text-neutral-600 dark:text-neutral-400 hover:text-black dark:hover:text-white'
+                    }`}
+                  >
+                    Tangkap Layar Tab (Localhost)
+                  </button>
+                </div>
+
+                {screenshotMode === 'device' && (
+                  <label className="flex items-center gap-2 text-xs text-neutral-600 dark:text-neutral-300 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={includeBezelMockup}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setIncludeBezelMockup(checked);
+                        executeScreenshot(screenshotPane, 'device', checked);
+                      }}
+                      className="rounded border-neutral-300 text-black focus:ring-0 w-3.5 h-3.5"
+                    />
+                    <span>Bingkai Mockup (Bezel)</span>
+                  </label>
+                )}
+              </div>
+
+              {/* Main Content Area */}
+              <div className="flex-1 overflow-y-auto space-y-3 min-h-0">
+                {/* Loading State */}
+                {(isCapturing || isCapturing2) && (
+                  <div className="flex flex-col items-center justify-center p-8 bg-neutral-50 dark:bg-neutral-950 rounded-xl border border-neutral-100 dark:border-neutral-800 text-center space-y-3 min-h-[220px]">
+                    <Loader2 size={32} className="animate-spin text-emerald-600 dark:text-emerald-400" />
+                    <div>
+                      <p className="font-semibold text-sm">Mengambil Tangkapan Layar...</p>
+                      <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+                        Memproses resolusi {getDeviceDimensions(screenshotPane).targetW} × {getDeviceDimensions(screenshotPane).targetH} px
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Error Banner */}
+                {!isCapturing && !isCapturing2 && screenshotError && (
+                  <div className="bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800/80 p-4 rounded-xl text-xs space-y-2">
+                    <div className="flex items-start gap-2 text-red-700 dark:text-red-300 font-semibold">
+                      <AlertCircle size={16} className="shrink-0 mt-0.5" />
+                      <span>{screenshotError}</span>
+                    </div>
+                    {screenshotMode === 'device' && (
+                      <div className="pt-2 border-t border-red-200/60 dark:border-red-900/60 flex items-center justify-between gap-2">
+                        <span className="text-red-600 dark:text-red-400 text-[11px]">
+                          Jika website berjalan di localhost/port lokal, gunakan mode tangkap tab.
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setScreenshotMode('tab');
+                            executeScreenshot(screenshotPane, 'tab', false);
+                          }}
+                          className="px-2.5 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-[11px] font-medium shrink-0 cursor-pointer"
+                        >
+                          Coba Tangkap Tab
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Result Preview */}
+                {!isCapturing && !isCapturing2 && screenshotResult && (
+                  <div className="space-y-3">
+                    <div className="relative group bg-neutral-100 dark:bg-neutral-950 p-2 rounded-xl border border-neutral-200 dark:border-neutral-800 flex items-center justify-center overflow-hidden max-h-[340px]">
+                      <img
+                        src={screenshotResult.url}
+                        alt="Hasil screenshot responsive"
+                        className="max-h-[320px] max-w-full object-contain rounded shadow-md"
+                      />
+                      <div className="absolute bottom-3 left-3 bg-black/75 backdrop-blur-xs text-white text-[10px] font-mono px-2 py-0.5 rounded-md flex items-center gap-1.5">
+                        <span className="font-semibold text-emerald-400">PNG</span>
+                        <span>•</span>
+                        <span>{screenshotResult.width} × {screenshotResult.height} px</span>
+                        <span>•</span>
+                        <span>{screenshotResult.sizeKb} KB</span>
+                      </div>
+                    </div>
+
+                    <div className="bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/80 p-2.5 rounded-xl flex items-center gap-2 text-xs text-emerald-800 dark:text-emerald-300">
+                      <Check size={16} className="text-emerald-500 shrink-0" />
+                      <span>File tangkapan layar otomatis terunduh ke perangkat Anda.</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Action Buttons */}
+              <div className="mt-4 pt-3 border-t border-neutral-100 dark:border-neutral-800 flex flex-wrap items-center justify-between gap-2 shrink-0">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => executeScreenshot(screenshotPane, screenshotMode, includeBezelMockup)}
+                    disabled={isCapturing || isCapturing2}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-neutral-200 dark:border-neutral-800 text-xs font-medium text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    <RefreshCw size={13} className={isCapturing || isCapturing2 ? 'animate-spin' : ''} />
+                    <span>Ambil Ulang</span>
+                  </button>
+                  {screenshotResult && (
+                    <button
+                      type="button"
+                      onClick={() => window.open(screenshotResult.url, '_blank')}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-neutral-200 dark:border-neutral-800 text-xs font-medium text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors cursor-pointer"
+                      title="Buka gambar penuh di tab baru"
+                    >
+                      <ExternalLink size={13} />
+                      <span className="hidden sm:inline">Ukuran Penuh</span>
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {screenshotResult && (
+                    <button
+                      type="button"
+                      onClick={copyScreenshotToClipboard}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-neutral-200 dark:border-neutral-800 text-xs font-medium text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors cursor-pointer"
+                    >
+                      {copiedScreenshot ? (
+                        <>
+                          <Check size={13} className="text-emerald-500" />
+                          <span className="text-emerald-600 dark:text-emerald-400">Tersalin!</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy size={13} />
+                          <span>Salin Gambar</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={downloadScreenshotResult}
+                    disabled={!screenshotResult}
+                    className="flex items-center gap-1.5 bg-black dark:bg-white text-white dark:text-black px-4 py-1.5 rounded-lg text-xs font-semibold hover:opacity-90 transition-opacity cursor-pointer disabled:opacity-40"
+                  >
+                    <Download size={13} />
+                    <span>Unduh PNG</span>
+                  </button>
+                </div>
               </div>
             </div>
           </div>

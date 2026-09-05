@@ -71,6 +71,47 @@ async function startServer() {
     }
   });
 
+  // API Route to capture screenshot of URL at given device width & height
+  app.get("/api/screenshot", async (req, res) => {
+    const targetUrl = req.query.url as string;
+    const width = Math.min(Math.max(parseInt(req.query.width as string) || 1200, 320), 2560);
+    const height = Math.min(Math.max(parseInt(req.query.height as string) || 800, 320), 2560);
+
+    if (!targetUrl) {
+      res.status(400).json({ ok: false, error: 'URL target diperlukan' });
+      return;
+    }
+
+    let formattedUrl = targetUrl.trim();
+    if (!/^https?:\/\//i.test(formattedUrl)) {
+      formattedUrl = `https://${formattedUrl}`;
+    }
+
+    try {
+      const thumUrl = `https://image.thum.io/get/width/${width}/crop/${height}/${formattedUrl}`;
+      const response = await fetch(thumUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`Screenshot service HTTP ${response.status}`);
+      }
+
+      const arrayBuffer = await response.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+
+      res.setHeader('Content-Type', 'image/png');
+      res.setHeader('Content-Disposition', `inline; filename="screenshot-${width}x${height}.png"`);
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      res.send(buffer);
+    } catch (error: any) {
+      console.error('Screenshot API error:', error);
+      res.status(502).json({ ok: false, error: 'Gagal mengambil screenshot', details: error?.message });
+    }
+  });
+
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
