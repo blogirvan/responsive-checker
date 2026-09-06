@@ -1236,21 +1236,6 @@ window.addEventListener('message', (e) => {
         onScroll={() => handleContainerScroll(pane)}
         className={`preview-pane-container flex-1 overflow-auto flex flex-col items-center p-3 sm:p-6 relative w-full ${activeDev === 'responsive' ? 'pt-2 sm:pt-4' : 'pt-4 sm:pt-8'}`}
       >
-        {/* Device Info Badge */}
-        <div className="flex items-center gap-2 mb-3 shrink-0">
-          <div className="bg-white/90 dark:bg-neutral-900/90 text-neutral-700 dark:text-neutral-300 text-xs px-3 py-1 rounded-full font-mono border border-neutral-200 dark:border-neutral-800 shadow-xs backdrop-blur-sm flex items-center gap-2">
-            <span className="font-semibold text-black dark:text-white">{currentDevice.name}</span>
-            <span className="text-neutral-300 dark:text-neutral-700">•</span>
-            <span>{currentDevice.width === '100%' ? (resWidth === '100%' ? 'Responsive (100%)' : `${resWidth}px`) : `${currentDevice.width} × ${currentDevice.height}`}</span>
-            {zoomVal !== 100 && (
-              <>
-                <span className="text-neutral-300 dark:text-neutral-700">•</span>
-                <span className="text-neutral-500">{zoomVal}%</span>
-              </>
-            )}
-          </div>
-        </div>
-
         {/* Responsive Mode Breakpoint Scrubber */}
         {activeDev === 'responsive' && (
           <div className="w-full max-w-3xl shrink-0 flex flex-col gap-2.5 z-30 mb-5 bg-white dark:bg-neutral-900 p-3 sm:p-4 rounded-xl border border-neutral-200 dark:border-neutral-800 shadow-xs transition-colors">
@@ -1340,7 +1325,7 @@ window.addEventListener('message', (e) => {
               <Monitor size={18} />
             </div>
             <div className="flex flex-col">
-              <span className="font-bold text-sm sm:text-base tracking-tight text-black dark:text-white leading-tight">Responsive Cek</span>
+              <span className="font-bold text-sm sm:text-base tracking-tight text-black dark:text-white leading-tight">iResponsive Cek</span>
               <span className="text-[10px] text-neutral-400 dark:text-neutral-500 hidden sm:inline leading-none">Multi-Device Viewport Tester</span>
             </div>
           </div>
