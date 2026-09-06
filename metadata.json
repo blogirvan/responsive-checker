@@ -1,5 +1,5 @@
 {
-  "name": "Responsive Checker",
+  "name": "iResponsive Checker",
   "description": "A tool to test website responsiveness across different device sizes.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
